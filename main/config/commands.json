@@ -1,0 +1,9 @@
+{
+    "open cmd": "cmd.exe /k start cmd",
+    "open command prompt": "cmd.exe /k start cmd",
+    "open powershell": "start powershell.exe",
+    "open vs code": "code .",
+    "open chrome": "start chrome",
+    "open opera": "start opera",
+    "open file explorer": "explorer ."
+}
