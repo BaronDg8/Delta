@@ -918,6 +918,8 @@ class CortanaManager(QWidget):
         proc.write(b'call "C:/Users/iceke/anaconda3/condabin/activate.bat" base\n')
         # 2) switch to _internal folder
         proc.write(b"cd _internal\n")
+        # 2b) switch to main folder (where voice_activation.py actually is)
+        proc.write(b"cd main")
         # 3) run the script by name
         proc.write(b'python "voice_activation.py"\n')
         self.append_manager_log("Dispatched voice activation to terminal", "white")
