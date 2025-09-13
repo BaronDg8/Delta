@@ -20,7 +20,9 @@ from mic_system import MicSystem
 import queue
 import array
 
+# tools
 from tools.opencode_module import OpenCodeModule
+from tools.AppLauncher import AppLauncher
 
 class TeeStream:
     def __init__(self, *streams):
@@ -33,109 +35,16 @@ class TeeStream:
         for s in self.streams:
             s.flush()
 
-# log_file = open("Delta_log_cache.txt", "a", encoding="utf-8")
-# sys.stdout = TeeStream(sys.__stdout__, log_file)
-    
-
-class AppLauncher:
-    """
-    Builds a quick index of Start Menu shortcuts (.lnk) and PATH executables,
-    then fuzzy-matches 'open <app>' requests and launches them.
-    """
-    START_MENU_DIRS = [
-        os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), r"Microsoft\Windows\Start Menu\Programs"),
-        os.path.join(os.environ.get("APPDATA",     os.path.expanduser(r"~\AppData\Roaming")), r"Microsoft\Windows\Start Menu\Programs"),
-    ]
-
-    # simple alias map so common nicknames work
-    ALIASES = {
-        "vs code": "visual studio code",
-        "vscode": "visual studio code",
-        "edge": "microsoft edge",
-        "chrome": "google chrome",
-        "word": "microsoft word",
-        "excel": "microsoft excel",
-        "powerpoint": "microsoft powerpoint",
-        "discord": "discord",
-        "spotify": "spotify",
-    }
-
-    def __init__(self):
-        self.index = None  # name(lower) -> path
-
-    def _build_index(self):
-        idx = {}
-
-        # 1) Start Menu shortcuts (.lnk)
-        for root in self.START_MENU_DIRS:
-            if not os.path.isdir(root):
-                continue
-            for path in glob.glob(os.path.join(root, "**", "*.lnk"), recursive=True):
-                name = os.path.splitext(os.path.basename(path))[0].lower()
-                idx[name] = path
-
-        # 2) Executables in PATH
-        for d in os.environ.get("PATH", "").split(os.pathsep):
-            if not d or not os.path.isdir(d):
-                continue
-            for exe in glob.glob(os.path.join(d, "*.exe")):
-                name = os.path.splitext(os.path.basename(exe))[0].lower()
-                # don't overwrite .lnk if we already have that name
-                idx.setdefault(name, exe)
-
-        self.index = idx
-
-    def _ensure_index(self):
-        if self.index is None:
-            self._build_index()
-
-    def _normalize_query(self, q: str) -> str:
-        q = q.strip().lower()
-        return self.ALIASES.get(q, q)
-
-    def find(self, query: str) -> str | None:
-        """Return a filesystem path (.lnk or .exe) for the best match."""
-        self._ensure_index()
-        q = self._normalize_query(query)
-        if q in self.index:
-            return self.index[q]
-
-        # fuzzy match on names
-        names = list(self.index.keys())
-        match = get_close_matches(q, names, n=1, cutoff=0.6)
-        if match:
-            return self.index[match[0]]
-        return None
-
-    def launch(self, query: str) -> tuple[bool, str]:
-        target = self.find(query)
-        if not target:
-            return False, f"I couldn't find {query}."
-
-        try:
-            # .lnk / .url via ShellExecute
-            if target.lower().endswith((".lnk", ".url")):
-                os.startfile(target)
-            else:
-                # Run .exe directly (no shell), use its folder as cwd
-                cwd = os.path.dirname(target) or None
-                subprocess.Popen([target], cwd=cwd, shell=False)
-            name = os.path.splitext(os.path.basename(target))[0]
-            return True, f"Opening {name}."
-        except Exception as e:
-            return False, f"Sorry, I couldn’t open {query}: {e}"
-
+# TOOL: DeltaCommands (command handling, process management, resource toggles)
 class DeltaCommands:
     """
     Encapsulates all command‐handling logic:
         - process_command (built‐in commands like list/kill, toggles, etc.)
         - chat_with_ai (fallback to the LLM)
-        - send_notifier_command (CPU/GPU/RAM toggles)
     """
+    # import the plugin/tool then put the tools def in tools then put a send prompt to say that it's active
 
-        # import the plugin/tool then put the tools def in tools then put a send prompt to say that it's active
-    
-    tools = []
+    tools = [AppLauncher()]
 
     def __init__(self):
         self.custom_commands = {}
@@ -234,28 +143,7 @@ class DeltaCommands:
                     if killed
                     else f"Could not kill any processes matching '{target}'."
                 )
-
-        # GPU/CPU/RAM toggles
-        toggles = {
-            "disable gpu monitoring": ("disable_gpu_monitoring", "GPU monitoring disabled."),
-            "enable gpu monitoring":  ("enable_gpu_monitoring",  "GPU monitoring enabled."),
-            "disable cpu monitoring": ("disable_cpu_monitoring", "CPU monitoring disabled."),
-            "enable cpu monitoring":  ("enable_cpu_monitoring",  "CPU monitoring enabled."),
-            "disable ram monitoring": ("disable_ram_monitoring", "RAM monitoring disabled."),
-            "enable ram monitoring":  ("enable_ram_monitoring",  "RAM monitoring enabled."),
-            "tell me my resource usage": ("get_resource_usage", "Current resource usage:"),
-        }
-        if cmd in toggles:
-            (command_to_send, reply_message) = toggles[cmd]
-            # Caller will use send_notifier_command to actually send it
-            # Return a special prefix so GUI knows to call send_notifier
-            reply_message = f"{reply_message}\n{self.get_resource_usage()}" if command_to_send == "get_resource_usage" else reply_message
-            print (f"[NOTIFIER::{command_to_send}]")
-            return f"{reply_message}"
-
-        if cmd == "open task manager":
-            return "opening task manager..."
-
+        
         # Built‑in simple replies
         basics = {
             "hello": "Hello! How can I assist you today?",
@@ -285,81 +173,7 @@ class DeltaCommands:
         # nothing matched
         return None
 
-    def send_notifier_command(self, command_str: str, host='localhost', port=5050) -> str:
-        """
-        Send one of the CPU/GPU/RAM toggle commands (string like "disable_cpu_monitoring") 
-        to the resource_notifier's socket. Returns whatever text the notifier replied.
-        """
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect((host, port))
-                s.sendall(command_str.encode('utf-8'))
-                resp = s.recv(1024).decode()
-                return resp
-        except Exception as e:
-            return f"[ERROR] Could not send to notifier: {e}"
-
-    def get_resource_usage(self) -> str:
-        """
-        Get current CPU, GPU, and RAM usage as a formatted string.
-        """
-        cpu_usage = psutil.cpu_percent(interval=1) if hasattr(psutil, "cpu_percent") else "N/A (CPU monitoring not available)"
-        ram_usage = psutil.virtual_memory().percent if hasattr(psutil, "virtual_memory") else "N/A (RAM monitoring not available)"
-        gpu_usage = psutil.gpu_percent(interval=1) if hasattr(psutil, "gpu_percent") else "N/A (GPU monitoring not available)"
-
-        # Try to get GPU temperature if available
-        if hasattr(psutil, "sensors_temperatures"):
-            try:
-                temps = psutil.sensors_temperatures()
-                # Try common GPU keys
-                for key in ("gpu", "amdgpu", "nvidia", "coretemp"):
-                    if key in temps and temps[key]:
-                        gpu_usage = f"{temps[key][0].current}°C"
-                        break
-            except Exception:
-                pass
-
-        return (
-            f"CPU Usage: {cpu_usage}%\n"
-            f"RAM Usage: {ram_usage}%\n"
-            f"GPU Usage: {gpu_usage}"
-        )
-
-    def get_gpu_status(self) -> str:
-        """
-        Returns a string with GPU utilization, memory usage, and temperature using nvidia-smi.
-        If not available, returns a message.
-        """
-        try:
-            result = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
-                    "--format=csv,noheader,nounits"
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=2
-            )
-            if result.returncode != 0:
-                return "GPU status not available (nvidia-smi error)."
-            # Example output: "12, 1024, 4096, 45"
-            values = result.stdout.strip().split(',')
-            if len(values) == 4:
-                util, mem_used, mem_total, temp = [v.strip() for v in values]
-                return (
-                    f"GPU Utilization: {util}%\n"
-                    f"GPU Memory: {mem_used} MiB / {mem_total} MiB\n"
-                    f"GPU Temperature: {temp}°C"
-                )
-            else:
-                return "GPU status not available (unexpected nvidia-smi output)."
-        except FileNotFoundError:
-            return "nvidia-smi not found. GPU status unavailable."
-        except Exception as e:
-            return f"Error retrieving GPU status: {e}"
-
+# TOOL: ChatAI (speech-to-text and text-to-speech logic)
 class ChatAI:
     # Handles microphone input (speech-to-text) and text-to-speech using MicSystem.
     
@@ -492,17 +306,16 @@ class ChatAI:
                 self._mic_system.stop_stream()
         return stop
 
-
-
 def start_voice_activation():
     script_path = os.path.join(os.path.dirname(__file__), "voice_activation.py")
     subprocess.Popen([sys.executable, script_path])
 
 if __name__ == "__main__":
+    # TOOL USAGE: ChatAI instance
     ai = ChatAI()
+    # TOOL USAGE: DeltaCommands instance
     Delta = DeltaCommands()
-    
-    # Choose how to talk to OpenCode: "run" (simplest) or "serve" (HTTP API)
+    # TOOL USAGE: OpenCodeModule (code execution and interaction)
     oc = OpenCodeModule(mode="run")  # or: OpenCodeModule(mode="serve")
     
     # Start Qt application first
