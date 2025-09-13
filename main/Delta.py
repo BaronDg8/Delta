@@ -23,17 +23,7 @@ import array
 # tools
 from tools.opencode_module import OpenCodeModule
 from tools.AppLauncher import AppLauncher
-
-class TeeStream:
-    def __init__(self, *streams):
-        self.streams = streams
-    def write(self, data):
-        for s in self.streams:
-            s.write(data)
-            s.flush()
-    def flush(self):
-        for s in self.streams:
-            s.flush()
+from tools.kill_process import kill_process_tool
 
 # TOOL: DeltaCommands (command handling, process management, resource toggles)
 class DeltaCommands:
@@ -42,9 +32,10 @@ class DeltaCommands:
         - process_command (built‐in commands like list/kill, toggles, etc.)
         - chat_with_ai (fallback to the LLM)
     """
+    
     # import the plugin/tool then put the tools def in tools then put a send prompt to say that it's active
 
-    tools = [AppLauncher()]
+    tools = [AppLauncher(), kill_process_tool]
 
     def __init__(self):
         self.custom_commands = {}
@@ -57,7 +48,10 @@ class DeltaCommands:
                 self.custom_commands = json.load(f)
         except Exception as e:
             print(f"Error loading commands.json: {e}")
+
+        # Initialize tools
         self.app_launcher = AppLauncher()
+        self.kill_process_tool = kill_process_tool
 
     from typing import Optional
 
@@ -69,12 +63,17 @@ class DeltaCommands:
         """
         cmd = user_input.lower().strip()
         
-        # --- generic "open <app>" support ---
+        # App launcher
         m = re.match(r"^(?:open|launch|start)\s+(.+)$", cmd, flags=re.I)
         if m:
             app_query = m.group(1).strip()
             ok, msg = self.app_launcher.launch(app_query)
             return msg  # Delta will speak this
+
+        # kill process
+        response = self.kill_process_tool(cmd)
+        if response is not None:
+            return response
         
         # Checks custom commands.json first
         if cmd in self.custom_commands:
@@ -97,78 +96,7 @@ class DeltaCommands:
             except Exception as e:
                 return f"Sorry, I couldn’t run {cmd}: {e}"
 
-        if cmd == "list processes":
-            processes = []
-            for proc in psutil.process_iter(attrs=["pid", "name", "status"]):
-                try:
-                    info = proc.info
-                    processes.append(
-                        f"PID: {info['pid']}, Name: {info.get('name','N/A')}, "
-                        f"Status: {info.get('status','N/A')}"
-                    )
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-            response = "\n".join(processes[:30])
-            if len(processes) > 30:
-                response += "\n... (listing first 30 processes)"
-            return response
-
-        if cmd.startswith("kill process") or cmd.startswith("kill"):
-            parts = cmd.split(maxsplit=2)
-            if len(parts) < 3:
-                return "Please specify a process ID or name to kill."
-            target = parts[2]
-            try:
-                pid = int(target)
-                proc = psutil.Process(pid)
-                proc.terminate()
-                return f"Process {pid} terminated."
-            except ValueError:
-                # treat as name substring
-                matched = [
-                    p for p in psutil.process_iter(attrs=["pid","name"])
-                    if target in (p.info["name"] or "").lower()
-                ]
-                if not matched:
-                    return f"No process found with name containing '{target}'."
-                killed = []
-                for p in matched:
-                    try:
-                        p.terminate()
-                        killed.append(p.info["pid"])
-                    except Exception:
-                        pass
-                return (
-                    f"Killed processes with PIDs: {killed}"
-                    if killed
-                    else f"Could not kill any processes matching '{target}'."
-                )
         
-        # Built‑in simple replies
-        basics = {
-            "hello": "Hello! How can I assist you today?",
-            "how are you": "I'm just a virtual assistant, but I'm always ready to help!",
-            "who are you": "I am Delta, your AI assistant.",
-            "bye": "Goodbye! Have a great day!",
-            "what time is it": f"The time is {datetime.datetime.now().strftime('%I:%M %p')}.",
-            "what is today's date": f"Today's date is {datetime.datetime.now().strftime('%A, %B %d, %Y')}."
-        }
-        if cmd in basics:
-            return basics[cmd]
-        
-        def command_scripts():
-            """
-            List of command scripts that can be executed.
-            """
-            return {
-                "open notepad": "notepad.exe",
-                "open powershell": "powershell.exe",
-                "open command prompt": "cmd.exe",
-                "open settings": "ms-settings:"
-            }
-            
-        if cmd in command_scripts():
-            return f"[LAUNCH::{command_scripts()[cmd]}]"
 
         # nothing matched
         return None
