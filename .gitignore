@@ -1,2 +1,5 @@
 /.vscode
 /desktop.ini
+/pyinstaller
+/scripts
+/__pycache__
