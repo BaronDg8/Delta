@@ -1,8 +1,8 @@
 """
 Cortana Manager Executable
- "pyinstaller --noconsole  manager.py" to update the executable
- "pyinstaller --noconsole  manager.py --icon=cortana.png" to update the executable with an icon
- # pyinstaller --noconsole manager.py --icon=cortana.png --add-data "voice_activation.py;." --add-data "resource_notifier.py;." --add-data "Delta.py;." --add-data "chat_room.py;." --add-data "mic_system.py;." --add-data "mouth.py;." --add-data "commands.json;." --add-data "settings.json;." --add-data "ignore_config.json;." --add-data "cortana.png;."
+ pyinstaller --noconsole  manager.py to update the executable
+ pyinstaller --noconsole  manager.py --icon=cortana.png to update the executable with an icon
+ pyinstaller --noconsole manager.py --icon=cortana.png --add-data "C:\Users\Your user\Downloads\Delta;main" --add-data "cortana.png"
 """
 
 import sys
