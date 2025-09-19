@@ -1,105 +1,54 @@
-import datetime
-from pydoc import text
-import psutil
-import socket
+from mouth import ReactiveWireframe2DCircle
+from PyQt5.QtWidgets import QApplication
+from mic_system import MicSystem
 import speech_recognition as sr
+import os, sys, subprocess
 import pyttsx3
 import threading
-from PyQt5.QtWidgets import QApplication, QWidget
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPainter, QPen, QColor
-import numpy as np
-import random
 import json
-
-import os, sys, subprocess, shutil, glob, re
-from difflib import get_close_matches
-
-from mouth import ReactiveWireframe2DCircle
-from mic_system import MicSystem
 import queue
 import array
+
+from langchain_core.messages import HumanMessage
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.tools import Tool
 
 # tools
 from tools.opencode_module import OpenCodeModule
 from tools.AppLauncher import AppLauncher
 from tools.kill_process import kill_process_tool
 
-# TOOL: DeltaCommands (command handling, process management, resource toggles)
-class DeltaCommands:
-    """
-    Encapsulates all command‐handling logic:
-        - process_command (built‐in commands like list/kill, toggles, etc.)
-        - chat_with_ai (fallback to the LLM)
-    """
-    
-    # import the plugin/tool then put the tools def in tools then put a send prompt to say that it's active
+import logging
+logging.basicConfig(level=logging.DEBUG)  # logging
 
-    tools = [AppLauncher(), kill_process_tool]
+MIC_INDEX = None
+recognizer = sr.Recognizer()
+mic = sr.Microphone(device_index=MIC_INDEX)
 
-    def __init__(self):
-        self.custom_commands = {}
-        try:
-            # Build the path to commands.json next to this script
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            commands_path = os.path.join(base_dir, "config", "commands.json")
 
-            with open(commands_path, "r", encoding="utf-8") as f:
-                self.custom_commands = json.load(f)
-        except Exception as e:
-            print(f"Error loading commands.json: {e}")
+from langchain_ollama import ChatOllama, OllamaLLM
 
-        # Initialize tools
-        self.app_launcher = AppLauncher()
-        self.kill_process_tool = kill_process_tool
+llm = ChatOllama(model="qwen3:1.7b", reasoning=False)
 
-    from typing import Optional
+# instantiate your tool classes (if they expose a callable method like .run or .call)
 
-    def process_command(self, user_input: str) -> Optional[str]:
-        """
-        Take a lowercase, stripped user_input string and return:
-            - a text response if it matches a built‐in command
-            - None if no built‐in command matched (so that the caller can fallback to AI)
-        """
-        cmd = user_input.lower().strip()
-        
-        # App launcher
-        m = re.match(r"^(?:open|launch|start)\s+(.+)$", cmd, flags=re.I)
-        if m:
-            app_query = m.group(1).strip()
-            ok, msg = self.app_launcher.launch(app_query)
-            return msg  # Delta will speak this
+tools = [AppLauncher, kill_process_tool, OpenCodeModule]
 
-        # kill process
-        response = self.kill_process_tool(cmd)
-        if response is not None:
-            return response
-        
-        # Checks custom commands.json first
-        if cmd in self.custom_commands:
-            action = self.custom_commands[cmd]
-            # Always run in a new PowerShell instance with working directory set
-            powershell_cmd = [
-            "powershell.exe",
-            "-NoProfile",
-            "-Command",
-            f"Set-Location -Path 'C:\\Users\\iceke'; {action}"
-            ]
-            try:
-                subprocess.Popen(
-                    powershell_cmd,
-                    shell=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                return f"Okay, running {cmd}"
-            except Exception as e:
-                return f"Sorry, I couldn’t run {cmd}: {e}"
+prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are Delta, an intelligent, conversational AI assistant. Your goal is to be helpful, friendly, and informative. You can respond in natural, human-like language and use tools when needed to answer questions more accurately. Always explain your reasoning simply when appropriate, and keep your responses conversational and concise.",
+        ),
+        ("human", "{input}"),
+        ("placeholder", "{agent_scratchpad}"),
+    ]
+)
 
-        
+agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=prompt)
+executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
-        # nothing matched
-        return None
 
 # TOOL: ChatAI (speech-to-text and text-to-speech logic)
 class ChatAI:
@@ -117,14 +66,15 @@ class ChatAI:
     def _audio_callback(self, chunk):
         self.audio_queue.put(chunk)
 
-    def listen(self) -> str:
+    # Synchronous single-shot input
+    def get_input(self) -> str:
         """
         Records a phrase using MicSystem and returns the recognized text.
+        This method only returns the user's raw input (no side effects like speaking).
         """
         self.audio_queue.queue.clear()
         self._mic_system = MicSystem(callback=self._audio_callback)
         self._mic_system.start_stream()
-        print("Listening (MicSystem)... Speak now.")
         try:
             frames = []
             silence_chunks = 0
@@ -151,23 +101,27 @@ class ChatAI:
             if self._mic_system:
                 self._mic_system.stop_stream()
 
-    def speak(self, text: str):
-        # tell the listener to pause
-        self.speaking_flag = True
-
-        self.engine.say(text)
-        self.engine.runAndWait()
-
-        # now resume listening
-        self.speaking_flag = False
-    
-    def listen_continuous(self, callback):
+    # Synchronous output (text-only or text+speech)
+    def deliver_output(self, text: str, speak: bool = True):
         """
-        Continuously listens in the background and calls the callback with recognized text.
-        Uses simple silence detection to determine end of speech.
+        Outputs text to console and optionally speaks it.
+        This method only handles assistant output.
+        """
+        print(f"Delta: {text}")
+        if speak:
+            self.speaking_flag = True
+            self.engine.say(text)
+            self.engine.runAndWait()
+            self.speaking_flag = False
+
+    # Continuous listening with separated user input callback
+    def start_continuous_listening(self, user_callback):
+        """
+        Continuously listens in the background and calls user_callback(user_text).
+        The callback receives only the user's raw text input. Assistant output should be handled separately.
+        Returns a stop() function.
         """
         def rms(chunk):
-            # Convert bytes to signed 16-bit integers
             samples = array.array('h', chunk)
             if not samples:
                 return 0
@@ -179,12 +133,11 @@ class ChatAI:
             self._mic_system.start_stream()
             buffer = []
             silence_chunks = 0
-            silence_threshold = 150   # Lower = less sensitive to silence
-            silence_chunk_limit = 20  # Higher = waits longer before ending phrase
+            silence_threshold = 150
+            silence_chunk_limit = 20
 
             while True:
                 if self.speaking_flag:
-                    # drop any partial buffer and wait a moment
                     buffer.clear()
                     silence_chunks = 0
                     continue
@@ -197,33 +150,31 @@ class ChatAI:
                         silence_chunks += 1
                     else:
                         silence_chunks = 0
-                    # If we've had enough silence, treat as end of phrase
                     if silence_chunks >= silence_chunk_limit and buffer:
                         audio_data = b''.join(buffer)
                         audio = sr.AudioData(audio_data, self._mic_system.rate, 2)
                         try:
                             text = self.recognizer.recognize_google(audio)
                             if text.strip():
-                                callback(text)
+                                user_callback(text)
                         except sr.UnknownValueError:
                             pass
                         except sr.RequestError:
-                            callback("Speech recognition service unavailable.")
+                            user_callback("Speech recognition service unavailable.")
                         buffer.clear()
                         silence_chunks = 0
                 except queue.Empty:
-                    # If buffer has data but no new chunks, treat as end of phrase
                     if buffer:
                         audio_data = b''.join(buffer)
                         audio = sr.AudioData(audio_data, self._mic_system.rate, 2)
                         try:
                             text = self.recognizer.recognize_google(audio)
                             if text.strip():
-                                callback(text)
+                                user_callback(text)
                         except sr.UnknownValueError:
                             pass
                         except sr.RequestError:
-                            callback("Speech recognition service unavailable.")
+                            user_callback("Speech recognition service unavailable.")
                         buffer.clear()
                         silence_chunks = 0
 
@@ -239,124 +190,98 @@ def start_voice_activation():
     subprocess.Popen([sys.executable, script_path])
 
 if __name__ == "__main__":
-    # TOOL USAGE: ChatAI instance
-    ai = ChatAI()
-    # TOOL USAGE: DeltaCommands instance
-    Delta = DeltaCommands()
-    # TOOL USAGE: OpenCodeModule (code execution and interaction)
-    oc = OpenCodeModule(mode="run")  # or: OpenCodeModule(mode="serve")
-    
-    # Start Qt application first
-    app = QApplication(sys.argv)
+    def setup_orb(app):
+        # Load default screen index from config (safe fallback)
+        default_screen_index = 0
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "config", "settings.json"), "r") as f:
+                settings = json.load(f)
+            default_screen_index = settings.get("default_screen_index", 0)
+        except Exception:
+            pass
 
-    # --- Load settings.json for default_screen_index ---
-    import json
-    default_screen_index = 0  # Fallback if settings not found
-    try:
-        with open(os.path.join(os.path.dirname(__file__), "config", "settings.json"), "r") as f:
-            settings = json.load(f)
-        default_screen_index = settings.get("default_screen_index", 0)
-    except Exception:
-        pass
+        screens = app.screens()
+        if 0 <= default_screen_index < len(screens):
+            screen_geom = screens[default_screen_index].geometry()
+        else:
+            screen_geom = app.primaryScreen().geometry()
 
-    # Move orb to the selected screen
-    screens = app.screens()
-    if 0 <= default_screen_index < len(screens):
-        screen_geom = screens[default_screen_index].geometry()
-    else:
-        screen_geom = app.primaryScreen().geometry()
+        max_orb_size = min(300, screen_geom.width(), screen_geom.height())
+        orb = ReactiveWireframe2DCircle(
+            n_nodes=50,
+            threshold=0.6,
+            fps=30,
+            diameter=max_orb_size,
+            max_pulse=0.5,
+            damping=0.2
+        )
+        orb.setMinimumSize(max_orb_size, max_orb_size)
+        orb.setMaximumSize(max_orb_size, max_orb_size)
+        orb.resize(max_orb_size, max_orb_size)
+        x = (screen_geom.width() - max_orb_size) // 2 + screen_geom.x()
+        y = screen_geom.height() - max_orb_size - 40 + screen_geom.y()
+        orb.move(x, y)
+        orb.show()
+        return orb
 
-    # Calculate the max size that fits the screen
-    max_orb_size = min(300, screen_geom.width(), screen_geom.height())
-    # Ensure orb fits within available screen area
-    max_orb_size = min(max_orb_size, screen_geom.width(), screen_geom.height())
 
-    # --- Add the orb widget with correct diameter ---
-    orb = ReactiveWireframe2DCircle(
-        n_nodes=50,
-        threshold=0.6,
-        fps=30,
-        diameter=max_orb_size,
-        max_pulse=0.5,
-        damping=0.2
-    )
-    orb.setMinimumSize(max_orb_size, max_orb_size)
-    orb.setMaximumSize(max_orb_size, max_orb_size)
-    orb.resize(max_orb_size, max_orb_size)
-    orb.show()
+    def main():
+        ai = ChatAI()
+        app = QApplication(sys.argv)
+        orb = setup_orb(app)
 
-    x = (screen_geom.width() - max_orb_size) // 2 + screen_geom.x()
-    y = screen_geom.height() - max_orb_size - 40 + screen_geom.y()
-    orb.move(x, y)
+        stop_listening_holder = [None]
 
-    # Start speech recognition in a background thread
-    stop_listening_holder = [None]  # Use a list to hold the reference
+        def handle_user_input(user_input):
+            # separate user input from assistant output
+            print(f"User: {user_input}")
 
-    def handle_text(text):
-        print(f"You said: {text}")
-        
-        lower = text.strip().lower()
-        if lower.startswith("ask open code") or lower.startswith("open code:"):
-            # extract the prompt after the prefix
-            if lower.startswith("ask open code"):
-                prompt = text.strip()[len("ask open code"):]
-            else:
-                prompt = text.split(":", 1)[1].strip()
+            # run the agent in a background thread so recognition/UI aren't blocked
+            def process_input(text):
+                try:
+                    # Use the agent executor to generate a reply instead of echoing
+                    response = executor.run(text)
+                except Exception as e:
+                    response = "Sorry, I couldn't process that."
+                    print("Agent error:", e)
+
+                # show assistant output separately and speak
+                try:
+                    orb.setLevel(0.3)
+                except Exception:
+                    pass
+                ai.deliver_output(response, speak=True)
+                try:
+                    orb.setLevel(0.0)
+                except Exception:
+                    pass
+
+                # After handling any command, shut down UI and restart voice activation
+                if stop_listening_holder[0]:
+                    stop_listening_holder[0](wait_for_stop=False)
+                try:
+                    orb.close()
+                except Exception:
+                    pass
+                start_voice_activation()
+                app.quit()
+
+            threading.Thread(target=process_input, args=(user_input,), daemon=True).start()
+
+        def start_listening():
+            stop_listening_holder[0] = ai.start_continuous_listening(handle_user_input)
+
+        # Start continuous listening in a daemon thread
+        threading.Thread(target=start_listening, daemon=True).start()
+
+        try:
+            sys.exit(app.exec_())
+        finally:
+            if stop_listening_holder[0]:
+                stop_listening_holder[0](wait_for_stop=False)
             try:
-                # If you picked serve mode above:
-                # oc.ensure_server()
-                # reply = oc.ask_serve(prompt)
-                # Otherwise (run mode, default):
-                reply = oc.ask_run(prompt)
-            except Exception as e:
-                reply = f"OpenCode error: {e}"
-                print(reply)
+                orb.close()
+            except Exception:
+                pass
 
-            # speak it with your existing orb/tts pattern
-            orb.setLevel(0.3)
-            ai.speak(reply)
-            orb.setLevel(0.0)
-
-            # your existing “finish & go back to voice_activation” flow
-            if stop_listening_holder[0]:
-                stop_listening_holder[0](wait_for_stop=False)
-            orb.close()
-            start_voice_activation()
-            app.quit()
-            return
-        
-        
-        if text.strip().lower() == "exit":
-            print("Exiting...")
-            if stop_listening_holder[0]:
-                stop_listening_holder[0](wait_for_stop=False)
-            orb.close()
-            start_voice_activation()  # <-- Add this line
-            app.quit()
-            return
-        response = Delta.process_command(text)
-        if response is None:
-            response = f"Sorry, I didn't understand '{text}'. Can you please rephrase?"
-        print(f"Delta: {response}")        
-        
-                
-        # --- Pulse orb when speaking ---
-        orb.setLevel(0.3)
-        ai.speak(response)
-        orb.setLevel(0.0)
-
-        # After handling any command, exit and start voice activation
-        if stop_listening_holder[0]:
-            stop_listening_holder[0](wait_for_stop=False)
-        orb.close()
-        start_voice_activation()
-        app.quit()
-        return
-
-    def start_listening():
-        stop_listening_holder[0] = ai.listen_continuous(handle_text)
-
-    threading.Thread(target=start_listening, daemon=True).start()
-
-    sys.exit(app.exec_())
-    start_voice_activation()
+    main()

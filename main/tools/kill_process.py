@@ -1,9 +1,19 @@
+from langchain.tools import tool
 import cmd
 import psutil
 
+@tool("kill_process", return_direct=True)
 def kill_process_tool(cmd: str) -> str | None:
-    cmd = cmd.strip().lower()  
-    
+    """Kill a process by name or ID.
+
+    Args:
+        cmd (str): The command to execute, including the process name or ID.
+
+    Returns:
+        str | None: A message indicating the result of the operation.
+    """
+    cmd = cmd.strip().lower()
+
     if cmd == "list processes":
                 processes = []
                 for proc in psutil.process_iter(attrs=["pid", "name", "status"]):

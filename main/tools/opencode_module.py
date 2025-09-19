@@ -1,10 +1,13 @@
 # opencode_module.py
 import os, sys, time, platform, shutil, subprocess, requests
+from langchain.tools import tool
+
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4096
 
-class OpenCodeModule:
+@tool("OpenCodeModule", return_direct=True)
+def OpenCodeModule() -> str:
     """
     Bridge Delta <-> OpenCode.
     mode="run":   fire-and-forget via `opencode run`

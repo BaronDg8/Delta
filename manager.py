@@ -1,9 +1,7 @@
-"""
-Cortana Manager Executable
- pyinstaller --noconsole  manager.py to update the executable
- pyinstaller --noconsole  manager.py --icon=cortana.png to update the executable with an icon
- pyinstaller --noconsole manager.py --icon=cortana.png --add-data "C:\Users\Your user\Downloads\Delta;main" --add-data "cortana.png"
-"""
+# Cortana Manager Executable
+# pyinstaller --noconsole  manager.py to update the executable
+# pyinstaller --noconsole  manager.py --icon=cortana.png to update the executable with an icon
+# pyinstaller --noconsole manager.py --icon=cortana.png --add-data "C:\Users\Your user\Downloads\Delta;main" --add-data "cortana.png"
 
 import sys
 import subprocess
@@ -648,7 +646,7 @@ class CortanaManager(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.voice_process = None
-        self.notifier_process = None
+        # notifier removed
         self.manager_log = []
         self.terminal_process = None  # For terminal tab
 
@@ -674,9 +672,7 @@ class CortanaManager(QWidget):
         self.raphael_log_timer.timeout.connect(self.refresh_raphael_logs)
         self.raphael_log_timer.start(2000)  # Refresh every 2 seconds
 
-        self.notifier_log_timer = QTimer(self)
-        self.notifier_log_timer.timeout.connect(self.refresh_notifier_logs)
-        self.notifier_log_timer.start(2000)  # Refresh every 2 seconds
+        # notifier timers removed
 
         self.load_default_commands_on_startup()
 
@@ -710,13 +706,8 @@ class CortanaManager(QWidget):
         btn_stop_voice.clicked.connect(self.stop_voice_activation)
         mgr_layout.addWidget(btn_stop_voice)
 
-        btn_start_notifier = QPushButton("Start Resource Notifier")
-        btn_start_notifier.clicked.connect(self.start_notifier)
-        mgr_layout.addWidget(btn_start_notifier)
-
-        btn_stop_notifier = QPushButton("Stop Resource Notifier")
-        btn_stop_notifier.clicked.connect(self.stop_notifier)
-        mgr_layout.addWidget(btn_stop_notifier)
+        # resource notifier removed from manager controls
+        # btn_start_notifier / btn_stop_notifier removed
 
         # Manager Logs pane
         self.manager_log_view = QTextEdit()
@@ -743,16 +734,7 @@ class CortanaManager(QWidget):
         r_layout.addWidget(btn_refresh_raphael)
         log_tabs.addTab(raphael_tab, "Delta Logs")
 
-        # Notifier Logs
-        notifier_tab = QWidget()
-        n_layout = QVBoxLayout(notifier_tab)
-        self.notifier_log_view = QTextEdit()
-        self.notifier_log_view.setReadOnly(True)
-        n_layout.addWidget(self.notifier_log_view)
-        btn_refresh_notifier = QPushButton("Refresh Notifier Logs")
-        btn_refresh_notifier.clicked.connect(lambda: self.refresh_notifier_logs(True))
-        n_layout.addWidget(btn_refresh_notifier)
-        log_tabs.addTab(notifier_tab, "Notifier Logs")
+        # Notifier Logs removed (notifier_log_view and refresh button removed)
 
         logs_layout.addWidget(log_tabs)
         main_tabs.addTab(logs_tab, "Logs")
@@ -923,18 +905,6 @@ class CortanaManager(QWidget):
         # 3) run the script by name
         proc.write(b'python "voice_activation.py"\n')
         self.append_manager_log("Dispatched voice activation to terminal", "white")
-
-    def start_notifier(self):
-        """CD into _internal then run resource_notifier.py in the persistent shell."""
-        proc = self.terminal_tab.process
-        if not proc or proc.state() != QProcess.Running:
-            self.append_manager_log("No shell running!", "red")
-            return
-
-        proc.write(b'call "C:/Users/iceke/anaconda3/condabin/activate.bat" base\n')
-        proc.write(b"cd _internal\n")
-        proc.write(b'python "resource_notifier.py"\n')
-        self.append_manager_log("Dispatched resource notifier to terminal", "white")
 
     """"""""""
         def start_voice_activation(self):
@@ -1126,7 +1096,7 @@ class CortanaManager(QWidget):
         elif cmd == "status":
             status_lines = []
             status_lines.append(f"Voice process: {'Running' if self.voice_process and self.voice_process.state() == QProcess.Running else 'Stopped'}")
-            status_lines.append(f"Notifier process: {'Running' if self.notifier_process and self.notifier_process.state() == QProcess.Running else 'Stopped'}")
+            # notifier status removed
             status_lines.append(f"Terminal (cmd.exe): {'Running' if self.cmd_process and self.cmd_process.state() == QProcess.Running else 'Stopped'}")
             self.terminal_tab.terminal_output.appendPlainText("System status:\n" + "\n".join(status_lines))
         elif cmd == "reload":

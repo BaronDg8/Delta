@@ -1,7 +1,9 @@
+from langchain.tools import tool
 import os, glob, subprocess
 from difflib import get_close_matches
 
-class AppLauncher:
+@tool("AppLauncher", return_direct=True)
+def AppLauncher(query: str) -> str:
     """
     Builds a quick index of Start Menu shortcuts (.lnk) and PATH executables,
     then fuzzy-matches 'open <app>' requests and launches them.
