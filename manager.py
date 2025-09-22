@@ -905,25 +905,7 @@ class CortanaManager(QWidget):
         # 3) run the script by name
         proc.write(b'python "voice_activation.py"\n')
         self.append_manager_log("Dispatched voice activation to terminal", "white")
-
-    """"""""""
-        def start_voice_activation(self):
-            base = self.terminal_tab.config.get("script_directory", "scripts")
-            base = os.path.abspath(base)
-            internal = os.path.join(base, "_internal")
-            script = os.path.abspath(os.path.join(internal, "voice_activation.py"))
-            self.append_manager_log("Dispatched voice activation to terminal", "white")
-            self.terminal_tab.run_script_by_path(script)
-            
-        def start_notifier(self):
-            base = self.terminal_tab.config.get("script_directory", "scripts")
-            base = os.path.abspath(base)
-            internal = os.path.join(base, "_internal")
-            script = os.path.abspath(os.path.join(internal, "resource_notifier.py"))
-            self.terminal_tab.run_script_by_path(script)
-            self.append_manager_log("Dispatched resource notifier to terminal", "white")
-    """""""""
-
+        
     def stop_notifier(self):
             if self.notifier_process and self.notifier_process.state() != QProcess.NotRunning:
                 self.notifier_process.terminate()
