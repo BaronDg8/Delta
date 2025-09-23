@@ -296,10 +296,6 @@ if __name__ == "__main__":
     def main():
         ai = ChatAI()
         app = QApplication(sys.argv)
-        orb = create_orb(app)
-        
-        global _orb_bridge
-        _orb_bridge = OrbBridge(orb)
         
         default_screen_index = load_settings()
         screens = app.screens()
@@ -311,6 +307,11 @@ if __name__ == "__main__":
         orb = create_orb(screen_geom)
         globals()["orb_instance"] = orb
         
+        # Create the bridge only after orb exists
+        global _orb_bridge
+        if orb is not None:
+            _orb_bridge = OrbBridge(orb)
+
         stop_listening_holder = [None]
 
         def handle_user_input(user_input):
@@ -331,7 +332,7 @@ if __name__ == "__main__":
                     print("Agent error:", e)
                     response = "Sorry, I couldn't process that."
                 print(f"Delta: {response}")
-                speak_with_orb(ai, orb, response)
+                speak_with_orb(ai, response)
 
                 
             threading.Thread(target=process_input, args=(user_input,), daemon=True).start()
