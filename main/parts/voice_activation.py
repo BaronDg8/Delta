@@ -7,7 +7,7 @@ import subprocess
 import numpy as np
 import speech_recognition as sr
 
-from mic_system import MicSystem
+from main.parts.mic_system import MicSystem
 
 WAKE_WORDS = ("cortana",)           # add more aliases if you want
 PHRASE_TIME_LIMIT = 3.0             # seconds max per phrase chunk

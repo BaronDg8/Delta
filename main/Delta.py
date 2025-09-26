@@ -17,8 +17,8 @@ import speech_recognition as sr
 import pyttsx3
 
 # local UI / audio tools
-from mouth import ReactiveWireframe2DCircle
-from mic_system import MicSystem
+from main.parts.mouth import ReactiveWireframe2DCircle
+from main.parts.mic_system import MicSystem
 
 # langchain / tools
 from langchain_core.messages import HumanMessage
