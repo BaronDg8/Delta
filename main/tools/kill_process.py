@@ -53,6 +53,6 @@ def kill_process_tool(cmd: str) -> str:
                     killed.append(p.info["pid"])
                 except Exception:
                     pass
-            return f"Killed processes with PIDs: {killed}" if killed else f"Could not kill any processes matching '{target}'."
+            return f"Killed {target}" if killed else f"Could not kill any processes matching '{target}'."
 
     return "Unsupported command. Use 'list processes' or 'kill <pid|name>'."
