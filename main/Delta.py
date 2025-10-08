@@ -7,13 +7,15 @@ import queue
 import array
 import subprocess
 import threading
+import audioop 
+import collections
+import speech_recognition as sr
 
 from typing import Optional
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer, QObject, pyqtSignal, QThread
 
-import speech_recognition as sr
 import pyttsx3
 
 # local UI / audio tools
@@ -33,6 +35,19 @@ from tools.kill_process import kill_process_tool
 from langchain_ollama import ChatOllama, OllamaLLM
 
 MIC_INDEX = None
+
+TRIGGER_WORD = "Delta"          # or whatever you want to say
+EXIT_WORDS = ("thank you", "that’s all", "stop listening")  # phrases to exit UI/agent
+
+# --- VAD / streaming mic config ---
+CHUNK_MS = 30                 # ~20–30 ms is typical
+SAMPLE_RATE = 16000           # match your mic/STT expectation
+SAMPLE_WIDTH = 2              # 16-bit PCM
+ENERGY_BOOST = 2.0            # raise if noisy room triggers false speech
+CALIBRATION_SECONDS = 1.0
+SILENCE_CHUNKS_END = 20       # ~0.6 sec at 30 ms chunks
+MIN_PHRASE_SECONDS = 0.5
+PHRASE_TIME_LIMIT = 15.0      # cut very long monologues
 
 # Helper: compact subprocess TTS to avoid blocking Qt
 def _run_tts_subprocess(text: str):
@@ -86,12 +101,7 @@ class ChatAI:
         self.speaking_flag = False
 
     def stop(self):
-        # kept for API compatibility
-        try:
-            if self._mic_system:
-                self._mic_system.stop_stream()
-        except Exception:
-            pass
+        pass
 
     # wrapper to run TTS in a background thread while updating orb
     def _speak_in_thread(self, text: str):
@@ -122,29 +132,8 @@ class ChatAI:
         except sr.RequestError:
             return "Speech recognition service unavailable."
 
-    # blocking single-shot input
     def get_input(self) -> str:
-        self.audio_queue.queue.clear()
-        self._mic_system = MicSystem(callback=self._audio_callback)
-        self._mic_system.start_stream()
-        try:
-            frames = []
-            silence_chunks = 0
-            max_chunks = int(5 * self._mic_system.rate / self._mic_system.chunk)
-            while len(frames) < max_chunks:
-                try:
-                    chunk = self.audio_queue.get(timeout=0.5)
-                except queue.Empty:
-                    silence_chunks += 1
-                    if silence_chunks > 5:
-                        break
-                    continue
-                frames.append(chunk)
-            audio_data = b"".join(frames)
-            return self._recognize_audio(audio_data, self._mic_system.rate)
-        finally:
-            if self._mic_system:
-                self._mic_system.stop_stream()
+        return ""
 
     # output routine
     def deliver_output(self, text: str, speak: bool = True):
@@ -171,8 +160,6 @@ class ChatAI:
             return mean_square ** 0.5
 
         def loop():
-            self._mic_system = MicSystem(callback=self._audio_callback)
-            self._mic_system.start_stream()
             buffer = []
             silence_chunks = 0
             silence_threshold = 150
@@ -212,6 +199,7 @@ class ChatAI:
 
         t = threading.Thread(target=loop, daemon=True)
         t.start()
+
 
 # small helpers used in main
 def load_settings() -> int:
@@ -264,13 +252,17 @@ _orb_bridge = None  # will be set in main() after orb is created
 
 def set_orb_level(level: float):
     """Safe from any thread."""
-    if _orb_bridge:
-        _orb_bridge.setLevelRequested.emit(level)
-
-
-def start_voice_activation():
-    script_path = os.path.join(os.path.dirname(__file__), "voice_activation.py")
-    subprocess.Popen([sys.executable, script_path])
+    global _orb_bridge
+    bridge = _orb_bridge
+    if not bridge:
+        return
+    try:
+        if bridge is None:
+            _orb_bridge = None
+            return
+    except Exception:
+        return
+    bridge.setLevelRequested.emit(level)
 
 def speak_with_orb(ai: "ChatAI", text: str):
     """
@@ -291,69 +283,202 @@ def speak_with_orb(ai: "ChatAI", text: str):
     # lower
     set_orb_level(0.0)
 
+def _calibrate_noise_floor(recognizer: sr.Recognizer, mic: sr.Microphone) -> float:
+    with mic as source:
+        recognizer.adjust_for_ambient_noise(source, duration=CALIBRATION_SECONDS)
+        # Grab a short buffer to estimate RMS
+        frames_to_read = int(SAMPLE_RATE * CALIBRATION_SECONDS) * SAMPLE_WIDTH
+        try:
+            raw = source.stream.read(frames_to_read)
+        except OSError:
+            # If overflow occurs, use zeros so VAD still starts with conservative floor
+            raw = b"\x00" * frames_to_read
+        rms = audioop.rms(raw, SAMPLE_WIDTH)
+        return max(100, rms)  # avoid zero floor
+
+
+def start_vad_listener(on_phrase, stop_event: threading.Event, mic_index: int = None):
+    """Continuously read the mic stream and emit whole phrases via on_phrase(text)."""
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 300
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.8
+    recognizer.phrase_threshold = 0.2
+    recognizer.non_speaking_duration = 0.5
+
+    mic = sr.Microphone(device_index=mic_index, sample_rate=SAMPLE_RATE)
+    noise_floor = _calibrate_noise_floor(recognizer, mic)
+    vad_threshold = noise_floor * ENERGY_BOOST
+
+    chunk_frames = int(SAMPLE_RATE * (CHUNK_MS / 1000.0))
+    max_frames = int(SAMPLE_RATE * PHRASE_TIME_LIMIT)
+    min_frames = int(SAMPLE_RATE * MIN_PHRASE_SECONDS)
+
+    with mic as source:
+        stream = source.stream  # PyAudio stream (stays OPEN)
+        buffer = bytearray()
+        voiced = False
+        silence_chunks = 0
+
+        while not stop_event.is_set():
+            try:
+                chunk = stream.read(chunk_frames * SAMPLE_WIDTH)
+            except OSError:
+                continue
+            if not chunk:
+                continue
+
+            # Keep the stream alive—no open/close toggling
+            buffer.extend(chunk)
+            rms = audioop.rms(chunk, SAMPLE_WIDTH)
+
+            if rms > vad_threshold:
+                voiced = True
+                silence_chunks = 0
+            else:
+                if voiced:
+                    silence_chunks += 1
+
+            phrase_ended = voiced and (
+                silence_chunks >= SILENCE_CHUNKS_END
+                or len(buffer) >= max_frames * SAMPLE_WIDTH
+            )
+
+            if phrase_ended:
+                # Only accept phrases with some minimum length
+                if len(buffer) >= min_frames * SAMPLE_WIDTH:
+                    audio = sr.AudioData(bytes(buffer), SAMPLE_RATE, SAMPLE_WIDTH)
+                    try:
+                        # Use the same recognizer backend you already use elsewhere
+                        text = recognizer.recognize_google(audio)
+                        if text and text.strip():
+                            on_phrase(text.strip())
+                    except sr.UnknownValueError:
+                        pass
+                    except Exception as e:
+                        print("STT error:", e)
+
+                # Reset for next phrase (stream stays open)
+                buffer.clear()
+                voiced = False
+                silence_chunks = 0
+
+
+def start_ui_and_ai(on_exit):
+    ai = ChatAI()
+    app = QApplication(sys.argv)
+
+    default_screen_index = load_settings()
+    screens = app.screens()
+    if 0 <= default_screen_index < len(screens):
+        screen_geom = screens[default_screen_index].geometry()
+    else:
+        screen_geom = app.primaryScreen().geometry()
+
+    orb = create_orb(screen_geom)
+    globals()["orb_instance"] = orb
+
+    global _orb_bridge
+    if orb is not None:
+        _orb_bridge = OrbBridge(orb)
+
+    session_stop = threading.Event()
+    exit_signaled = False
+
+    # One worker that processes phrases
+    def handle_phrase(text: str):
+        nonlocal exit_signaled
+        print("User:", text)
+        lower = text.lower()
+
+        # exit words end the ACTIVE session
+        if any(kw in lower for kw in EXIT_WORDS):
+            try: speak_with_orb(ai, "")
+            except Exception: pass
+            # ensure no further audio processing runs
+            session_stop.set()
+            QTimer.singleShot(0, app.quit)
+            exit_signaled = True
+            on_exit()
+            return
+
+        def process():
+            try:
+                result = executor.invoke({"input": text})
+                resp = (result.get("output") or result.get("result") or result.get("text")
+                        or next((v for v in result.values() if isinstance(v, str) and v.strip()), str(result))
+                        if isinstance(result, dict) else str(result))
+            except Exception as e:
+                print("Agent error:", e)
+                resp = "Sorry, I couldn't process that."
+            print("Delta:", resp)
+            speak_with_orb(ai, resp)
+
+        threading.Thread(target=process, daemon=True).start()
+
+    threading.Thread(
+        target=start_vad_listener,
+        args=(handle_phrase, session_stop, MIC_INDEX),
+        daemon=True
+    ).start()
+
+    app.exec_()
+    session_stop.set()
+
+
+    # Clean up after Qt closes
+    session_stop.set()
+    if not exit_signaled:
+        on_exit()
+    try: ai.stop()
+    except Exception: pass
+    try:
+        o = globals().get("orb_instance")
+        if o is not None: o.close()
+        globals()["orb_instance"] = None
+        globals()["_orb_bridge"] = None
+    except Exception: pass
+
 
 if __name__ == "__main__":
-    def main():
-        ai = ChatAI()
-        app = QApplication(sys.argv)
-        
-        default_screen_index = load_settings()
-        screens = app.screens()
-        if 0 <= default_screen_index < len(screens):
-            screen_geom = screens[default_screen_index].geometry()
-        else:
-            screen_geom = app.primaryScreen().geometry()
+    recognizer = sr.Recognizer()
+    mic = sr.Microphone(device_index=MIC_INDEX)
 
-        orb = create_orb(screen_geom)
-        globals()["orb_instance"] = orb
-        
-        # Create the bridge only after orb exists
-        global _orb_bridge
-        if orb is not None:
-            _orb_bridge = OrbBridge(orb)
+    def listen_for_trigger(timeout=10):
+        """
+        Keep the microphone stream open and continuously monitor for the trigger word.
+        We only close the stream when a trigger phrase is detected so the device does
+        not churn on/off between timeouts.
+        """
+        with mic as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            print("active")
 
-        stop_listening_holder = [None]
-
-        def handle_user_input(user_input):
-            print(f"User: {user_input}")
-            def process_input(text):
+            while True:
                 try:
-                    result = executor.invoke({"input": text})
-                    if isinstance(result, dict):
-                        for k in ("output", "result", "text"):
-                            if k in result and result[k]:
-                                response = result[k]; break
-                        else:
-                            vals = [v for v in result.values() if isinstance(v, str) and v.strip()]
-                            response = vals[0] if vals else str(result)
-                    else:
-                        response = str(result)
-                except Exception as e:
-                    print("Agent error:", e)
-                    response = "Sorry, I couldn't process that."
-                print(f"Delta: {response}")
-                speak_with_orb(ai, response)
+                    audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=3.5)
+                except sr.WaitTimeoutError:
+                    continue
 
-                
-            threading.Thread(target=process_input, args=(user_input,), daemon=True).start()
+                try:
+                    spoken_text = recognizer.recognize_google(audio)
+                except sr.UnknownValueError:
+                    continue
+                except Exception as err:
+                    print("Wake STT error:", err)
+                    continue
 
-        
-        
-        # start background continuous listening
-        threading.Thread(target=lambda: ai.start_continuous_listening(handle_user_input), daemon=True).start()
+                if spoken_text and TRIGGER_WORD.lower() in spoken_text.lower():
+                    return spoken_text
 
-        try:
-            sys.exit(app.exec_())
-        finally:
-            try:
-                ai.stop()
-            except Exception:
-                pass
-            try:
-                o = globals().get("orb_instance")
-                if o is not None:
-                    o.close()
-            except Exception:
-                pass
+    while True:
+        text = listen_for_trigger(timeout=10)
+        if not text:
+            continue
 
-    main()
+        print(f"Wake word detected: {text}")
+        # Launch the UI/agent; return here when user says EXIT_WORDS or timeout hits
+        done = threading.Event()
+        start_ui_and_ai(on_exit=lambda: done.set())
+        # Wait until UI closed (set by on_exit) before resuming wake mode
+        done.wait()
