@@ -31,6 +31,7 @@ from langchain.tools import Tool
 from tools.opencode_module import OpenCodeModule
 from tools.AppLauncher import AppLauncher
 from tools.kill_process import kill_process_tool
+from tools.docker_mcp import docker_mcp
 
 from langchain_ollama import ChatOllama, OllamaLLM
 
@@ -81,7 +82,7 @@ def _safe_set_orb_level(level: float):
 # LLM & agent setup (kept compact)
 llm = ChatOllama(model="qwen3:1.7b", reasoning=False)
 
-tools = [AppLauncher, kill_process_tool, OpenCodeModule]
+tools = [AppLauncher, kill_process_tool, OpenCodeModule, docker_mcp]
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are Delta, an intelligent, conversational AI assistant. Be helpful, friendly, concise."),
